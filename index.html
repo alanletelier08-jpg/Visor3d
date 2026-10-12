@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Visor 3D v3</title>
+<title>Visor 3D v4</title>
 <style>
   :root {
     --bg: #000;
@@ -44,6 +44,7 @@
   #status {
     position: absolute;
     top: 12px; left: 14px; right: 14px;
+    max-width: 55%;
     font-size: 14px;
     color: var(--dim);
     pointer-events: none;
@@ -114,12 +115,13 @@
 </head>
 <body>
   <div id="stage"></div>
-  <div id="ver">Versión 3 · gestos activos</div>
-  <div id="status" role="status">Modelo de prueba. Toca "Abrir archivo .stl" para cargar tu diseño.</div>
+  <div id="ver">Versión 4 · varias piezas</div>
+  <div id="status" role="status">Modelo de prueba. Toca "Agregar pieza .stl" para cargar tus diseños.</div>
 
   <div id="bar">
-    <label class="btn primary">Abrir archivo .stl<input id="archivo" type="file"></label>
-    <button class="btn" id="girar" type="button">Girar modelo 90°</button>
+    <label class="btn primary">Agregar pieza .stl<input id="archivo" type="file" multiple></label>
+    <button class="btn" id="girar" type="button">Girar pieza 90°</button>
+    <button class="btn" id="borrar" type="button">Borrar piezas</button>
     <button class="btn" id="auto" type="button" aria-pressed="false">Rotación automática</button>
     <button class="btn" id="reset" type="button">Restablecer vista</button>
     <button class="btn" id="full" type="button">Pantalla completa</button>
@@ -168,13 +170,20 @@
   controls.update();
   controls.saveState();
 
-  var material = new THREE.MeshStandardMaterial({
-    color: 0x9fd4ff, metalness: 0.15, roughness: 0.55
-  });
-  var mesh = null;
+  // Todas las piezas viven dentro de "pivot": girar o hacer zoom mueve la escena completa
   var pivot = new THREE.Group();
   scene.add(pivot);
-  window.visor = { pivot: pivot };
+
+  var COLORES = [0x9fd4ff, 0xffc98a, 0xa8e6a1, 0xf4a6c8, 0xd2b7ff, 0xf6e58d];
+  var piezas = [];          // cada una: { grupo, malla, demo }
+  var seleccion = null;
+  var escalaBase = null;    // la misma escala para todas, así conservan sus proporciones
+  var bordeDerecho = 0;
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg;
+    statusEl.className = isError ? 'error' : '';
+  }
 
   function restablecer() {
     controls.reset();
@@ -182,57 +191,155 @@
     pivot.scale.setScalar(1);
   }
 
-  function setStatus(msg, isError) {
-    statusEl.textContent = msg;
-    statusEl.className = isError ? 'error' : '';
+  function marcar(pieza, activa) {
+    pieza.malla.material.emissive.setHex(activa ? 0x1b5a80 : 0x000000);
   }
 
-  function mostrarGeometria(geom, esStl) {
-    if (mesh) {
-      pivot.remove(mesh);
-      mesh.geometry.dispose();
-    }
-    geom.computeBoundingBox();
+  function seleccionar(pieza) {
+    if (seleccion) marcar(seleccion, false);
+    seleccion = pieza;
+    if (seleccion) marcar(seleccion, true);
+  }
+
+  function piezaActiva() {
+    return seleccion || (piezas.length === 1 ? piezas[0] : null);
+  }
+
+  function borrarTodo() {
+    piezas.forEach(function (p) {
+      pivot.remove(p.grupo);
+      p.malla.geometry.dispose();
+      p.malla.material.dispose();
+    });
+    piezas = [];
+    seleccion = null;
+    escalaBase = null;
+    bordeDerecho = 0;
+  }
+
+  function agregarGeometria(geom, esStl, demo) {
+    if (!demo && piezas.length === 1 && piezas[0].demo) borrarTodo();
+
     geom.center();
     geom.computeBoundingBox();
     var size = new THREE.Vector3();
     geom.boundingBox.getSize(size);
     var maxDim = Math.max(size.x, size.y, size.z) || 1;
-    mesh = new THREE.Mesh(geom, material);
-    mesh.scale.setScalar(2 / maxDim);
+    if (escalaBase === null) escalaBase = 2 / maxDim;
+
+    var material = new THREE.MeshStandardMaterial({
+      color: COLORES[piezas.length % COLORES.length], metalness: 0.15, roughness: 0.55
+    });
+    var malla = new THREE.Mesh(geom, material);
+    malla.scale.setScalar(escalaBase);
     // Los STL de Tinkercad y la mayoría de programas CAD usan Z hacia arriba
-    mesh.rotation.x = esStl ? -Math.PI / 2 : 0;
-    pivot.add(mesh);
-    restablecer();
+    malla.rotation.x = esStl ? -Math.PI / 2 : 0;
+
+    var grupo = new THREE.Group();
+    grupo.add(malla);
+    var ancho = size.x * escalaBase;
+    var x = piezas.length === 0 ? 0 : bordeDerecho + 0.2 + ancho / 2;
+    grupo.position.set(x, 0, 0);
+    bordeDerecho = x + ancho / 2;
+    pivot.add(grupo);
+
+    var pieza = { grupo: grupo, malla: malla, demo: !!demo };
+    piezas.push(pieza);
+    if (piezas.length === 1) restablecer();
+    return pieza;
   }
 
   // Modelo de prueba
-  mostrarGeometria(new THREE.TorusKnotGeometry(0.6, 0.2, 160, 20), false);
+  agregarGeometria(new THREE.TorusKnotGeometry(0.6, 0.2, 160, 20), false, true);
 
-  function cargarArchivo(file) {
-    setStatus('Cargando ' + file.name + '…', false);
-    file.arrayBuffer().then(function (buf) {
-      var geom = new THREE.STLLoader().parse(buf);
-      if (!geom.attributes.position || geom.attributes.position.count === 0) {
-        throw new Error('vacío');
+  function cargarArchivos(lista) {
+    var archivos = Array.prototype.slice.call(lista);
+    var fallos = 0;
+    setStatus('Cargando ' + archivos.length + ' archivo(s)…', false);
+    archivos.reduce(function (cadena, file) {
+      return cadena.then(function () {
+        return file.arrayBuffer().then(function (buf) {
+          var geom = new THREE.STLLoader().parse(buf);
+          if (!geom.attributes.position || geom.attributes.position.count === 0) {
+            throw new Error('vacío');
+          }
+          agregarGeometria(geom, true, false);
+        }).catch(function () { fallos++; });
+      });
+    }, Promise.resolve()).then(function () {
+      if (fallos) {
+        setStatus('No se pudieron leer ' + fallos + ' archivo(s). Verifica que sean .stl válidos.', true);
+      } else {
+        setStatus(piezas.length + ' pieza(s) en la escena. Toca una pieza para elegirla.', false);
       }
-      mostrarGeometria(geom, true);
-      var triangulos = Math.round(geom.attributes.position.count / 3);
-      setStatus(file.name + ' · ' + triangulos.toLocaleString('es') + ' triángulos', false);
-    }).catch(function () {
-      setStatus('No se pudo leer el archivo. Verifica que sea un .stl válido.', true);
     });
   }
 
   document.getElementById('archivo').addEventListener('change', function (e) {
-    var f = e.target.files && e.target.files[0];
-    if (f) cargarArchivo(f);
+    if (e.target.files && e.target.files.length) cargarArchivos(e.target.files);
     e.target.value = '';
   });
 
   document.getElementById('girar').addEventListener('click', function () {
-    if (mesh) mesh.rotation.x += Math.PI / 2;
+    var p = piezaActiva();
+    if (p) {
+      p.malla.rotation.x += Math.PI / 2;
+    } else {
+      setStatus('Toca una pieza para elegirla y luego gírala.', false);
+    }
   });
+
+  document.getElementById('borrar').addEventListener('click', function () {
+    borrarTodo();
+    setStatus('Sin piezas. Toca "Agregar pieza .stl" para cargar tus diseños.', false);
+  });
+
+  // Elegir una pieza tocándola en la pantalla
+  var raycaster = new THREE.Raycaster();
+  var inicio = null;
+  renderer.domElement.addEventListener('pointerdown', function (e) {
+    inicio = { x: e.clientX, y: e.clientY, t: Date.now() };
+  });
+  renderer.domElement.addEventListener('pointerup', function (e) {
+    if (!inicio) return;
+    var movido = Math.hypot(e.clientX - inicio.x, e.clientY - inicio.y);
+    var rapido = Date.now() - inicio.t < 500;
+    inicio = null;
+    if (movido > 8 || !rapido) return;
+    var r = renderer.domElement.getBoundingClientRect();
+    var ndc = new THREE.Vector2(
+      ((e.clientX - r.left) / r.width) * 2 - 1,
+      -((e.clientY - r.top) / r.height) * 2 + 1
+    );
+    raycaster.setFromCamera(ndc, camera);
+    var golpe = raycaster.intersectObjects(piezas.map(function (p) { return p.malla; }), false)[0];
+    var elegida = null;
+    if (golpe) {
+      piezas.forEach(function (p) { if (p.malla === golpe.object) elegida = p; });
+    }
+    seleccionar(elegida);
+    setStatus(elegida ? 'Pieza elegida. Muévela con el dedo índice.' : 'Ninguna pieza elegida.', false);
+  });
+
+  // Mover la pieza elegida en el plano de la pantalla (dxN, dyN en fracción de pantalla)
+  var vR = new THREE.Vector3(), vU = new THREE.Vector3(), vF = new THREE.Vector3();
+  function moverPieza(dxN, dyN) {
+    var p = piezaActiva();
+    if (!p) return false;
+    var dist = camera.position.distanceTo(controls.target);
+    var alto = 2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    var ancho = alto * camera.aspect;
+    camera.updateMatrixWorld();
+    camera.matrixWorld.extractBasis(vR, vU, vF);
+    var d = new THREE.Vector3()
+      .addScaledVector(vR, dxN * ancho)
+      .addScaledVector(vU, dyN * alto);
+    d.applyQuaternion(pivot.quaternion.clone().invert()).divideScalar(pivot.scale.x);
+    p.grupo.position.add(d);
+    return true;
+  }
+
+  window.visor = { pivot: pivot, mover: moverPieza };
 
   var autoBtn = document.getElementById('auto');
   autoBtn.addEventListener('click', function () {
@@ -312,6 +419,7 @@ const DEDOS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,
                [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 
 const SENSIBILIDAD_GIRO = 6;   // más alto = gira más con el mismo movimiento
+const GANANCIA_MOVER = 1.3;    // más alto = la pieza se mueve más con el mismo movimiento
 const ESCALA_MIN = 0.3, ESCALA_MAX = 4;
 
 let landmarker = null, stream = null, activa = false, ultimoT = -1;
@@ -399,9 +507,22 @@ function puntoPinza(m) {
   return { x: (m[4].x + m[8].x) / 2, y: (m[4].y + m[8].y) / 2 };
 }
 
+// Dedo estirado: la punta queda más lejos de la muñeca que su articulación media
+function estirado(m, punta, medio) {
+  return distancia(m[0], m[punta]) > distancia(m[0], m[medio]) * 1.15;
+}
+function doblado(m, punta, medio) {
+  return distancia(m[0], m[punta]) < distancia(m[0], m[medio]) * 1.05;
+}
+// Solo el índice arriba y los otros tres dedos doblados
+function apuntando(m) {
+  return estirado(m, 8, 6) && doblado(m, 12, 10) && doblado(m, 16, 14) && doblado(m, 20, 18);
+}
+
 let pinzaAntes = false;
 let puntoPrev = null;
 let distPrev = null;
+let dedoPrev = null;
 
 // Devuelve un texto con lo que está haciendo el gesto
 function gestos(manos) {
@@ -413,8 +534,24 @@ function gestos(manos) {
   if (!pinzas.length) {
     puntoPrev = null;
     distPrev = null;
-    return manos.length ? 'Mano detectada · junta pulgar e índice para agarrar' : '';
+
+    // Índice arriba: mover la pieza elegida
+    const dedo = manos.find(apuntando);
+    if (dedo && v) {
+      const p = { x: dedo[8].x, y: dedo[8].y };
+      let estado = 'Moviendo la pieza';
+      if (dedoPrev) {
+        // La imagen de cámara está en espejo, por eso x lleva signo negativo
+        const ok = v.mover(-(p.x - dedoPrev.x) * GANANCIA_MOVER, -(p.y - dedoPrev.y) * GANANCIA_MOVER);
+        if (!ok) estado = 'Toca una pieza en la pantalla para elegirla';
+      }
+      dedoPrev = p;
+      return estado;
+    }
+    dedoPrev = null;
+    return manos.length ? 'Índice arriba = mover pieza · pinza = girar vista' : '';
   }
+  dedoPrev = null;
   if (!v) return 'Pinza activa';
 
   // Dos manos con pinza: zoom
@@ -429,16 +566,15 @@ function gestos(manos) {
     return 'Zoom: separa o junta las manos';
   }
 
-  // Una mano con pinza: girar
+  // Una mano con pinza: girar la vista de todas las piezas
   distPrev = null;
   const p = puntoPinza(pinzas[0]);
   if (puntoPrev) {
-    // La imagen de cámara está en espejo, por eso el signo de x es negativo
     v.pivot.rotation.y += -(p.x - puntoPrev.x) * SENSIBILIDAD_GIRO;
     v.pivot.rotation.x += (p.y - puntoPrev.y) * SENSIBILIDAD_GIRO;
   }
   puntoPrev = p;
-  return 'Girando el modelo';
+  return 'Girando la vista';
 }
 
 function dibujar(manos) {
@@ -470,6 +606,12 @@ function dibujar(manos) {
       ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
       ctx.fill();
     });
+    if (apuntando(m)) {
+      ctx.fillStyle = '#ffd166';
+      ctx.beginPath();
+      ctx.arc(m[8].x * w, m[8].y * h, 9, 0, Math.PI * 2);
+      ctx.fill();
+    }
   });
   mensaje(gestos(manos), 'ok');
 }
