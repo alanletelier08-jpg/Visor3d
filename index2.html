@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Visor 3D</title>
+<style>
+  :root {
+    --bg: #000;
+    --ink: #eef1f4;
+    --dim: #8e98a4;
+    --line: #2b323b;
+    --panel: #0d1014;
+    --accent: #5ac8fa;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); }
+  body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+    position: relative;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: absolute; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+
+  #status {
+    position: absolute;
+    top: 12px; left: 14px; right: 14px;
+    font-size: 14px;
+    color: var(--dim);
+    pointer-events: none;
+    line-height: 1.4;
+  }
+  #status.error { color: #ff8a80; }
+
+  #bar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    background: linear-gradient(to top, rgba(0,0,0,.92), rgba(0,0,0,0));
+  }
+  body.proyector #bar { display: none; }
+
+  .btn {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    font: inherit;
+    font-size: 15px;
+    padding: 12px 16px;
+    min-height: 44px;
+    border-radius: 10px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+  }
+  .btn:active { background: #1a2028; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .btn[aria-pressed="true"] { border-color: var(--accent); }
+  label.btn { position: relative; overflow: hidden; }
+  input[type=file] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; font-size: 0; }
+
+  #menu {
+    position: fixed;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    display: none;
+    opacity: .35;
+  }
+  body.proyector #menu { display: inline-flex; }
+
+  #cam {
+    position: fixed;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    right: 12px;
+    width: min(36vw, 260px);
+    display: none;
+    background: #000;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  body.proyector #cam { opacity: 0; pointer-events: none; }
+  #camWrap { position: relative; transform: scaleX(-1); background: #000; }
+  #camVideo, #camCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #camInfo { padding: 8px 10px; font-size: 13px; color: var(--dim); line-height: 1.35; }
+  #camInfo.ok { color: var(--accent); }
+  #camInfo.error { color: #ff8a80; }
+</style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div id="status" role="status">Modelo de prueba. Toca "Abrir archivo .stl" para cargar tu diseño.</div>
+
+  <div id="bar">
+    <label class="btn primary">Abrir archivo .stl<input id="archivo" type="file"></label>
+    <button class="btn" id="girar" type="button">Girar modelo 90°</button>
+    <button class="btn" id="auto" type="button" aria-pressed="false">Rotación automática</button>
+    <button class="btn" id="reset" type="button">Restablecer vista</button>
+    <button class="btn" id="full" type="button">Pantalla completa</button>
+    <button class="btn" id="camBtn" type="button">Activar cámara</button>
+    <button class="btn" id="proy" type="button">Modo proyector</button>
+  </div>
+  <button class="btn" id="menu" type="button">Menú</button>
+
+  <div id="cam">
+    <div id="camWrap">
+      <video id="camVideo" playsinline muted></video>
+      <canvas id="camCanvas"></canvas>
+    </div>
+    <div id="camInfo" role="status"></div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var statusEl = document.getElementById('status');
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x000000, 1);
+  stage.appendChild(renderer.domElement);
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+  camera.position.set(2.6, 1.8, 3.6);
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.75));
+  var key = new THREE.DirectionalLight(0xffffff, 0.9);
+  key.position.set(3, 5, 4);
+  scene.add(key);
+  var rim = new THREE.DirectionalLight(0x88aaff, 0.35);
+  rim.position.set(-4, -2, -3);
+  scene.add(rim);
+
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.autoRotateSpeed = 2.0;
+  controls.update();
+  controls.saveState();
+
+  var material = new THREE.MeshStandardMaterial({
+    color: 0x9fd4ff, metalness: 0.15, roughness: 0.55
+  });
+  var mesh = null;
+  var pivot = new THREE.Group();
+  scene.add(pivot);
+  window.visor = { pivot: pivot };
+
+  function restablecer() {
+    controls.reset();
+    pivot.rotation.set(0, 0, 0);
+    pivot.scale.setScalar(1);
+  }
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg;
+    statusEl.className = isError ? 'error' : '';
+  }
+
+  function mostrarGeometria(geom, esStl) {
+    if (mesh) {
+      pivot.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    geom.computeBoundingBox();
+    geom.center();
+    geom.computeBoundingBox();
+    var size = new THREE.Vector3();
+    geom.boundingBox.getSize(size);
+    var maxDim = Math.max(size.x, size.y, size.z) || 1;
+    mesh = new THREE.Mesh(geom, material);
+    mesh.scale.setScalar(2 / maxDim);
+    // Los STL de Tinkercad y la mayoría de programas CAD usan Z hacia arriba
+    mesh.rotation.x = esStl ? -Math.PI / 2 : 0;
+    pivot.add(mesh);
+    restablecer();
+  }
+
+  // Modelo de prueba
+  mostrarGeometria(new THREE.TorusKnotGeometry(0.6, 0.2, 160, 20), false);
+
+  function cargarArchivo(file) {
+    setStatus('Cargando ' + file.name + '…', false);
+    file.arrayBuffer().then(function (buf) {
+      var geom = new THREE.STLLoader().parse(buf);
+      if (!geom.attributes.position || geom.attributes.position.count === 0) {
+        throw new Error('vacío');
+      }
+      mostrarGeometria(geom, true);
+      var triangulos = Math.round(geom.attributes.position.count / 3);
+      setStatus(file.name + ' · ' + triangulos.toLocaleString('es') + ' triángulos', false);
+    }).catch(function () {
+      setStatus('No se pudo leer el archivo. Verifica que sea un .stl válido.', true);
+    });
+  }
+
+  document.getElementById('archivo').addEventListener('change', function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (f) cargarArchivo(f);
+    e.target.value = '';
+  });
+
+  document.getElementById('girar').addEventListener('click', function () {
+    if (mesh) mesh.rotation.x += Math.PI / 2;
+  });
+
+  var autoBtn = document.getElementById('auto');
+  autoBtn.addEventListener('click', function () {
+    controls.autoRotate = !controls.autoRotate;
+    autoBtn.setAttribute('aria-pressed', String(controls.autoRotate));
+  });
+
+  document.getElementById('reset').addEventListener('click', restablecer);
+
+  function pantallaCompleta(soloEntrar) {
+    var el = document.documentElement;
+    var activo = document.fullscreenElement || document.webkitFullscreenElement;
+    var aviso = 'No se pudo activar la pantalla completa aquí. Abre el enlace directamente en Chrome.';
+    try {
+      if (activo) {
+        if (!soloEntrar) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        return;
+      }
+      var pedir = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (!pedir) { setStatus(aviso, true); return; }
+      var p = pedir.call(el);
+      if (p && p.catch) p.catch(function () { setStatus(aviso, true); });
+    } catch (e) {
+      setStatus(aviso, true);
+    }
+  }
+
+  document.getElementById('full').addEventListener('click', function () {
+    pantallaCompleta(false);
+  });
+
+  document.getElementById('proy').addEventListener('click', function () {
+    document.body.classList.add('proyector');
+    statusEl.style.display = 'none';
+    pantallaCompleta(true);
+  });
+  document.getElementById('menu').addEventListener('click', function () {
+    document.body.classList.remove('proyector');
+    statusEl.style.display = '';
+  });
+
+  function ajustar() {
+    var w = stage.clientWidth || 1;
+    var h = stage.clientHeight || 1;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+  if (window.ResizeObserver) {
+    new ResizeObserver(ajustar).observe(stage);
+  }
+  window.addEventListener('resize', ajustar);
+  ajustar();
+
+  function animar() {
+    requestAnimationFrame(animar);
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animar();
+})();
+</script>
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm";
+
+const btn = document.getElementById('camBtn');
+const box = document.getElementById('cam');
+const wrap = document.getElementById('camWrap');
+const video = document.getElementById('camVideo');
+const canvas = document.getElementById('camCanvas');
+const info = document.getElementById('camInfo');
+const ctx = canvas.getContext('2d');
+
+const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+const MODELO = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const DEDOS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+               [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+const SENSIBILIDAD_GIRO = 6;   // más alto = gira más con el mismo movimiento
+const ESCALA_MIN = 0.3, ESCALA_MAX = 4;
+
+let landmarker = null, stream = null, activa = false, ultimoT = -1;
+
+function mensaje(texto, clase) {
+  info.textContent = texto;
+  info.className = clase || '';
+}
+
+async function crearDetector() {
+  const vision = await FilesetResolver.forVisionTasks(WASM);
+  const opciones = (delegado) => ({
+    baseOptions: { modelAssetPath: MODELO, delegate: delegado },
+    runningMode: 'VIDEO',
+    numHands: 2
+  });
+  try {
+    return await HandLandmarker.createFromOptions(vision, opciones('GPU'));
+  } catch (e) {
+    return await HandLandmarker.createFromOptions(vision, opciones('CPU'));
+  }
+}
+
+async function iniciar() {
+  btn.disabled = true;
+  box.style.display = 'block';
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    mensaje('La cámara necesita una página https. Sube el archivo a un hosting gratuito y ábrelo desde ahí.', 'error');
+    btn.disabled = false;
+    return;
+  }
+  try {
+    mensaje('Pidiendo permiso de cámara…');
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    wrap.style.aspectRatio = video.videoWidth + ' / ' + video.videoHeight;
+
+    if (!landmarker) {
+      mensaje('Cargando detector de manos…');
+      landmarker = await crearDetector();
+    }
+    activa = true;
+    btn.textContent = 'Detener cámara';
+    mensaje('Muestra tu mano a la cámara.');
+    bucle();
+  } catch (e) {
+    detener();
+    if (e && e.name === 'NotAllowedError') {
+      mensaje('Permiso de cámara denegado. Actívalo en los permisos del sitio en Chrome.', 'error');
+    } else {
+      mensaje('No se pudo iniciar la cámara o el detector. Revisa tu conexión e inténtalo de nuevo.', 'error');
+    }
+    box.style.display = 'block';
+  }
+  btn.disabled = false;
+}
+
+function detener() {
+  activa = false;
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  video.srcObject = null;
+  gestos([]);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  box.style.display = 'none';
+  btn.textContent = 'Activar cámara';
+}
+
+function distancia(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// Pinza: distancia pulgar-índice comparada con el tamaño de la mano
+function razonPinza(m) {
+  return distancia(m[4], m[8]) / (distancia(m[0], m[9]) || 1);
+}
+
+function puntoPinza(m) {
+  return { x: (m[4].x + m[8].x) / 2, y: (m[4].y + m[8].y) / 2 };
+}
+
+let pinzaAntes = false;
+let puntoPrev = null;
+let distPrev = null;
+
+// Devuelve un texto con lo que está haciendo el gesto
+function gestos(manos) {
+  const v = window.visor;
+  const umbral = pinzaAntes ? 0.5 : 0.35;   // histéresis para que no parpadee
+  const pinzas = manos.filter((m) => razonPinza(m) < umbral);
+  pinzaAntes = pinzas.length > 0;
+
+  if (!pinzas.length) {
+    puntoPrev = null;
+    distPrev = null;
+    return manos.length ? 'Mano detectada · junta pulgar e índice para agarrar' : '';
+  }
+  if (!v) return 'Pinza activa';
+
+  // Dos manos con pinza: zoom
+  if (pinzas.length >= 2) {
+    puntoPrev = null;
+    const d = distancia(puntoPinza(pinzas[0]), puntoPinza(pinzas[1]));
+    if (distPrev) {
+      const nueva = v.pivot.scale.x * (d / distPrev);
+      v.pivot.scale.setScalar(Math.min(ESCALA_MAX, Math.max(ESCALA_MIN, nueva)));
+    }
+    distPrev = d;
+    return 'Zoom: separa o junta las manos';
+  }
+
+  // Una mano con pinza: girar
+  distPrev = null;
+  const p = puntoPinza(pinzas[0]);
+  if (puntoPrev) {
+    // La imagen de cámara está en espejo, por eso el signo de x es negativo
+    v.pivot.rotation.y += -(p.x - puntoPrev.x) * SENSIBILIDAD_GIRO;
+    v.pivot.rotation.x += (p.y - puntoPrev.y) * SENSIBILIDAD_GIRO;
+  }
+  puntoPrev = p;
+  return 'Girando el modelo';
+}
+
+function dibujar(manos) {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!manos.length) {
+    gestos([]);
+    mensaje('No veo tu mano. Acércala a la cámara con buena luz.');
+    return;
+  }
+  manos.forEach((m) => {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(90,200,250,.9)';
+    ctx.beginPath();
+    DEDOS.forEach(([a, b]) => {
+      ctx.moveTo(m[a].x * w, m[a].y * h);
+      ctx.lineTo(m[b].x * w, m[b].y * h);
+    });
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    m.forEach((p) => {
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.fillStyle = razonPinza(m) < 0.4 ? '#5ac8fa' : '#ffffff';
+    [m[4], m[8]].forEach((p) => {
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  });
+  mensaje(gestos(manos), 'ok');
+}
+
+function bucle() {
+  if (!activa) return;
+  if (video.readyState >= 2 && video.currentTime !== ultimoT) {
+    ultimoT = video.currentTime;
+    const res = landmarker.detectForVideo(video, performance.now());
+    dibujar(res.landmarks || []);
+  }
+  requestAnimationFrame(bucle);
+}
+
+btn.addEventListener('click', () => { activa ? detener() : iniciar(); });
+</script>
+</body>
+</html>
