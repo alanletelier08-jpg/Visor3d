@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Visor 3D</title>
+<title>Visor 3D v3</title>
 <style>
   :root {
     --bg: #000;
@@ -29,6 +29,17 @@
   }
   #stage { position: absolute; inset: 0; }
   #stage canvas { display: block; width: 100%; height: 100%; }
+
+  #ver {
+    position: absolute;
+    top: 12px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: #5ac8fa;
+    opacity: .7;
+    pointer-events: none;
+  }
+  body.proyector #ver { display: none; }
 
   #status {
     position: absolute;
@@ -103,6 +114,7 @@
 </head>
 <body>
   <div id="stage"></div>
+  <div id="ver">Versión 3 · gestos activos</div>
   <div id="status" role="status">Modelo de prueba. Toca "Abrir archivo .stl" para cargar tu diseño.</div>
 
   <div id="bar">
@@ -160,6 +172,15 @@
     color: 0x9fd4ff, metalness: 0.15, roughness: 0.55
   });
   var mesh = null;
+  var pivot = new THREE.Group();
+  scene.add(pivot);
+  window.visor = { pivot: pivot };
+
+  function restablecer() {
+    controls.reset();
+    pivot.rotation.set(0, 0, 0);
+    pivot.scale.setScalar(1);
+  }
 
   function setStatus(msg, isError) {
     statusEl.textContent = msg;
@@ -168,7 +189,7 @@
 
   function mostrarGeometria(geom, esStl) {
     if (mesh) {
-      scene.remove(mesh);
+      pivot.remove(mesh);
       mesh.geometry.dispose();
     }
     geom.computeBoundingBox();
@@ -181,8 +202,8 @@
     mesh.scale.setScalar(2 / maxDim);
     // Los STL de Tinkercad y la mayoría de programas CAD usan Z hacia arriba
     mesh.rotation.x = esStl ? -Math.PI / 2 : 0;
-    scene.add(mesh);
-    controls.reset();
+    pivot.add(mesh);
+    restablecer();
   }
 
   // Modelo de prueba
@@ -219,9 +240,7 @@
     autoBtn.setAttribute('aria-pressed', String(controls.autoRotate));
   });
 
-  document.getElementById('reset').addEventListener('click', function () {
-    controls.reset();
-  });
+  document.getElementById('reset').addEventListener('click', restablecer);
 
   function pantallaCompleta(soloEntrar) {
     var el = document.documentElement;
@@ -292,6 +311,9 @@ const MODELO = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/
 const DEDOS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
                [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
 
+const SENSIBILIDAD_GIRO = 6;   // más alto = gira más con el mismo movimiento
+const ESCALA_MIN = 0.3, ESCALA_MAX = 4;
+
 let landmarker = null, stream = null, activa = false, ultimoT = -1;
 
 function mensaje(texto, clase) {
@@ -304,7 +326,7 @@ async function crearDetector() {
   const opciones = (delegado) => ({
     baseOptions: { modelAssetPath: MODELO, delegate: delegado },
     runningMode: 'VIDEO',
-    numHands: 1
+    numHands: 2
   });
   try {
     return await HandLandmarker.createFromOptions(vision, opciones('GPU'));
@@ -358,6 +380,7 @@ function detener() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null;
   video.srcObject = null;
+  gestos([]);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   box.style.display = 'none';
   btn.textContent = 'Activar cámara';
@@ -367,39 +390,88 @@ function distancia(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+// Pinza: distancia pulgar-índice comparada con el tamaño de la mano
+function razonPinza(m) {
+  return distancia(m[4], m[8]) / (distancia(m[0], m[9]) || 1);
+}
+
+function puntoPinza(m) {
+  return { x: (m[4].x + m[8].x) / 2, y: (m[4].y + m[8].y) / 2 };
+}
+
+let pinzaAntes = false;
+let puntoPrev = null;
+let distPrev = null;
+
+// Devuelve un texto con lo que está haciendo el gesto
+function gestos(manos) {
+  const v = window.visor;
+  const umbral = pinzaAntes ? 0.5 : 0.35;   // histéresis para que no parpadee
+  const pinzas = manos.filter((m) => razonPinza(m) < umbral);
+  pinzaAntes = pinzas.length > 0;
+
+  if (!pinzas.length) {
+    puntoPrev = null;
+    distPrev = null;
+    return manos.length ? 'Mano detectada · junta pulgar e índice para agarrar' : '';
+  }
+  if (!v) return 'Pinza activa';
+
+  // Dos manos con pinza: zoom
+  if (pinzas.length >= 2) {
+    puntoPrev = null;
+    const d = distancia(puntoPinza(pinzas[0]), puntoPinza(pinzas[1]));
+    if (distPrev) {
+      const nueva = v.pivot.scale.x * (d / distPrev);
+      v.pivot.scale.setScalar(Math.min(ESCALA_MAX, Math.max(ESCALA_MIN, nueva)));
+    }
+    distPrev = d;
+    return 'Zoom: separa o junta las manos';
+  }
+
+  // Una mano con pinza: girar
+  distPrev = null;
+  const p = puntoPinza(pinzas[0]);
+  if (puntoPrev) {
+    // La imagen de cámara está en espejo, por eso el signo de x es negativo
+    v.pivot.rotation.y += -(p.x - puntoPrev.x) * SENSIBILIDAD_GIRO;
+    v.pivot.rotation.x += (p.y - puntoPrev.y) * SENSIBILIDAD_GIRO;
+  }
+  puntoPrev = p;
+  return 'Girando el modelo';
+}
+
 function dibujar(manos) {
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
   if (!manos.length) {
+    gestos([]);
     mensaje('No veo tu mano. Acércala a la cámara con buena luz.');
     return;
   }
-  const m = manos[0];
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(90,200,250,.9)';
-  ctx.beginPath();
-  DEDOS.forEach(([a, b]) => {
-    ctx.moveTo(m[a].x * w, m[a].y * h);
-    ctx.lineTo(m[b].x * w, m[b].y * h);
-  });
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
-  m.forEach((p) => {
+  manos.forEach((m) => {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(90,200,250,.9)';
     ctx.beginPath();
-    ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
-    ctx.fill();
+    DEDOS.forEach(([a, b]) => {
+      ctx.moveTo(m[a].x * w, m[a].y * h);
+      ctx.lineTo(m[b].x * w, m[b].y * h);
+    });
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    m.forEach((p) => {
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.fillStyle = razonPinza(m) < 0.4 ? '#5ac8fa' : '#ffffff';
+    [m[4], m[8]].forEach((p) => {
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
+      ctx.fill();
+    });
   });
-
-  // Pinza: distancia pulgar-índice comparada con el tamaño de la mano
-  const tamano = distancia(m[0], m[9]) || 1;
-  const pinza = distancia(m[4], m[8]) / tamano < 0.35;
-  ctx.fillStyle = pinza ? '#5ac8fa' : '#ffffff';
-  [m[4], m[8]].forEach((p) => {
-    ctx.beginPath();
-    ctx.arc(p.x * w, p.y * h, 7, 0, Math.PI * 2);
-    ctx.fill();
-  });
-  mensaje(pinza ? 'Mano detectada · pinza activa' : 'Mano detectada · pinza abierta', 'ok');
+  mensaje(gestos(manos), 'ok');
 }
 
 function bucle() {
